@@ -743,9 +743,12 @@ def video_inpainting(args):
     create_dir(args.outroot)
     for i in range(len(comp_frames)):
         comp_frames[i] = comp_frames[i].astype(np.uint8)
-    imageio.mimwrite(
+        Image.fromarray(comp_frames[i]).save(
+            os.path.join(args.outroot, "{:05d}.png".format(i))
+        )
+    """imageio.mimwrite(
         os.path.join(args.outroot, "result.mp4"), comp_frames, fps=30, quality=8
-    )
+    )"""
     print(f"Done, please check your result in {args.outroot} ")
 
 
