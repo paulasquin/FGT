@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..")))
 sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..", "FGT")))
@@ -425,7 +426,8 @@ def video_inpainting(args):
             opts = yaml.full_load(f)
 
     for k in opts.keys():
-        if k in args:
+        # Update args based on yaml file except explicit path from cli
+        if k in args and k not in ["lafc_ckpts", "fgt_ckpts"]:
             setattr(args, k, opts[k])
 
     # Flow model.
@@ -514,7 +516,6 @@ def video_inpainting(args):
     )  # np array -> [h, w, c, N] (0~1)
 
     if args.mode == "video_extrapolation":
-
         # Creates video and flow where the extrapolated region are missing.
         (
             video,
@@ -767,7 +768,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--opt",
-        default="configs/object_removal.yaml",
+        default=Path(__file__).parent / "configs/object_removal.yaml",
         help="Please select your config file for inference",
     )
     # video completion
@@ -801,7 +802,7 @@ if __name__ == "__main__":
     # RAFT
     parser.add_argument(
         "--raft_model",
-        default="../LAFC/flowCheckPoint/raft-things.pth",
+        default=Path(__file__).parents[1] / "LAFC/flowCheckPoint/raft-things.pth",
         help="restore checkpoint",
     )
     parser.add_argument("--small", action="store_true", help="use small model")
@@ -815,10 +816,14 @@ if __name__ == "__main__":
     )
 
     # LAFC
-    parser.add_argument("--lafc_ckpts", type=str, default="../LAFC/checkpoint")
+    parser.add_argument(
+        "--lafc_ckpts", type=str, default=Path(__file__).parents[1] / "LAFC/checkpoint"
+    )
 
     # FGT
-    parser.add_argument("--fgt_ckpts", type=str, default="../FGT/checkpoint")
+    parser.add_argument(
+        "--fgt_ckpts", type=str, default=Path(__file__).parents[1] / "FGT/checkpoint"
+    )
 
     # extrapolation
     parser.add_argument(
