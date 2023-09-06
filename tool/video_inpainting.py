@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..")))
 sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..", "FGT")))
@@ -33,6 +34,14 @@ from utils.Poisson_blend_img import Poisson_blend_img
 from get_flowNN_gradient import get_flowNN_gradient
 from torchvision.transforms import ToTensor
 import cvbase
+
+
+from memory_profiler import profile
+from utils.base import tqdm
+
+from nvitop import Device
+
+nvitop_device = Device(0)
 
 
 def to_tensor(img):
@@ -366,9 +375,9 @@ def complete_flow(config, flow_model, flows, flow_masks, mode, device):
     t = diffused_flows.shape[2]
     filled_flows = [None] * t
     pivot = num_flows // 2
-    for i in range(t):
+    for i in (bar := tqdm(range(t))):
         indices = indicesGen(i, flow_interval, num_flows, t)
-        print("Indices: ", indices, "\r", end="")
+        bar.set_description(f"Indices: {indices}")
         cand_flows = flows[:, :, indices]
         cand_masks = flow_masks[:, :, indices]
         inputs = diffused_flows[:, :, indices]
@@ -416,16 +425,26 @@ def save_results(outdir, comp_frames):
         cv2.imwrite(out_path, comp_frames[i][:, :, ::-1])
 
 
+memory_prof_path = Path("memory_profiler.prof")
+if memory_prof_path.exists():
+    os.remove(memory_prof_path)
+
+fp = open(memory_prof_path, "w+")
+
+
+@profile(stream=fp)
 def video_inpainting(args):
     # device = torch.device('cuda:{}'.format(args.gpu))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
 
     if args.opt is not None:
-        with open(args.opt, "r") as f:
-            opts = yaml.full_load(f)
+        with open(args.opt, "r") as id_frame:
+            opts = yaml.full_load(id_frame)
 
     for k in opts.keys():
-        if k in args:
+        # Update args based on yaml file except explicit path from cli
+        if k in args and k not in ["lafc_ckpts", "fgt_ckpts"]:
             setattr(args, k, opts[k])
 
     # Flow model.
@@ -496,11 +515,9 @@ def video_inpainting(args):
             video.append(frame)
             video_flow.append(frame_flow)
 
-    video = torch.cat(video, dim=0)  # [n, c, h, w]
-    video_flow = torch.cat(video_flow, dim=0)
+    video = torch.cat(video, dim=0).to(device)  # [n, c, h, w]
+    video_flow = torch.cat(video_flow, dim=0).to(device)
     gts = video.clone()
-    video = video.to(device)
-    video_flow = video_flow.to(device)
 
     # Calcutes the corrupted flow.
     forward_flows = calculate_flow(
@@ -514,7 +531,6 @@ def video_inpainting(args):
     )  # np array -> [h, w, c, N] (0~1)
 
     if args.mode == "video_extrapolation":
-
         # Creates video and flow where the extrapolated region are missing.
         (
             video,
@@ -579,13 +595,18 @@ def video_inpainting(args):
     print("\nFinish flow completion.")
 
     if args.vis_completed_flows:
+        print("Saving completed flows.")
         save_flows(args.outroot, videoFlowF, videoFlowB)
 
     # Prepare gradients
+    print(f"Preparing gradients. - VRAM usage: {nvitop_device.memory_percent()}")
     gradient_x = np.empty(((imgH, imgW, 3, 0)), dtype=np.float32)
     gradient_y = np.empty(((imgH, imgW, 3, 0)), dtype=np.float32)
 
-    for indFrame in range(nFrame):
+    for indFrame in (bar := tqdm(range(nFrame))):
+        bar.set_description(
+            f"Computing gradients - VRAM usage: {nvitop_device.memory_percent()}%"
+        )
         img = video[:, :, :, indFrame]
         img[mask[:, :, indFrame], :] = 0
         img = (
@@ -620,6 +641,7 @@ def video_inpainting(args):
     video_comp = video
 
     # Gradient propagation.
+    print(f"Start gradient propagation - VRAM usage: {nvitop_device.memory_percent()}")
     gradient_x_filled, gradient_y_filled, mask_gradient = get_flowNN_gradient(
         args,
         gradient_x_filled,
@@ -632,6 +654,10 @@ def video_inpainting(args):
         None,
     )
 
+    print(
+        f"Finished gradient propagation - VRAM usage: {nvitop_device.memory_percent()}"
+    )
+
     # if there exist holes in mask, Poisson blending will fail. So I did this trick. I sacrifice some value. Another solution is to modify Poisson blending.
     for indFrame in range(nFrame):
         mask_gradient[:, :, indFrame] = scipy.ndimage.binary_fill_holes(
@@ -641,9 +667,10 @@ def video_inpainting(args):
     # After one gradient propagation iteration
     # gradient --> RGB
     frameBlends = []
-    for indFrame in range(nFrame):
-        print("Poisson blending frame {0:3d}".format(indFrame))
-
+    for indFrame in (bar := tqdm(range(nFrame))):
+        bar.set_description(
+            f"Blending frames - VRAM usage: {nvitop_device.memory_percent()}"
+        )
         if mask[:, :, indFrame].sum() > 0:
             try:
                 frameBlend, UnfilledMask = Poisson_blend_img(
@@ -680,7 +707,7 @@ def video_inpainting(args):
         else:
             frameBlend_ = video_comp[:, :, :, indFrame]
         frameBlends.append(frameBlend_)
-
+    print("Blending finished.")
     if args.vis_prop:
         save_fgcp(args.outroot, frameBlends, mask)
 
@@ -688,7 +715,7 @@ def video_inpainting(args):
 
     for i in range(len(frameBlends)):
         frameBlends[i] = frameBlends[i][:, :, ::-1]
-
+    print()
     frames_first = np2tensor(frameBlends, near="t").to(device)
     mask = np.moveaxis(mask, -1, 0)
     mask = mask[:, :, :, np.newaxis]
@@ -703,24 +730,32 @@ def video_inpainting(args):
     videoFlowF = np.moveaxis(videoFlowF, -1, 0)
 
     videoFlowF = np.concatenate([videoFlowF, videoFlowF[-1:, ...]], axis=0)
-
+    print(f"Move flow to tensor  -VRAM usage: {nvitop_device.memory_percent()}")
     flows = np2tensor(videoFlowF, near="t")
     flows = norm_flows(flows).to(device)
+    print(f"Flow moved to tensor -VRAM usage: {nvitop_device.memory_percent()}")
 
-    for f in range(0, video_length, neighbor_stride):
+    for id_frame in (bar := tqdm(range(0, video_length, neighbor_stride))):
         neighbor_ids = [
             i
             for i in range(
-                max(0, f - neighbor_stride), min(video_length, f + neighbor_stride + 1)
+                max(0, id_frame - neighbor_stride),
+                min(video_length, id_frame + neighbor_stride + 1),
             )
         ]
-        ref_ids = get_ref_index(f, neighbor_ids, video_length, ref_length, num_ref)
-        print(f, len(neighbor_ids), len(ref_ids))
+        """ref_ids = get_ref_index(
+            id_frame, neighbor_ids, video_length, ref_length, num_ref
+        )"""
+        ref_ids = []
+        bar.set_description(
+            f"{id_frame} {len(neighbor_ids)} {len(ref_ids)} - VRAM usage: {nvitop_device.memory_percent()}%"
+        )
         selected_frames = normed_frames[:, neighbor_ids + ref_ids]
         selected_masks = masks[:, neighbor_ids + ref_ids]
         masked_frames = selected_frames * (1 - selected_masks)
         selected_flows = flows[:, neighbor_ids + ref_ids]
         with torch.no_grad():
+            # import pdb; pdb.set_trace()
             filled_frames = FGT_model(masked_frames, selected_flows, selected_masks)
         filled_frames = (filled_frames + 1) / 2
         filled_frames = filled_frames.cpu().permute(0, 2, 3, 1).numpy() * 255
@@ -743,9 +778,12 @@ def video_inpainting(args):
     create_dir(args.outroot)
     for i in range(len(comp_frames)):
         comp_frames[i] = comp_frames[i].astype(np.uint8)
-    imageio.mimwrite(
+        Image.fromarray(comp_frames[i]).save(
+            os.path.join(args.outroot, "{:05d}.png".format(i))
+        )
+    """imageio.mimwrite(
         os.path.join(args.outroot, "result.mp4"), comp_frames, fps=30, quality=8
-    )
+    )"""
     print(f"Done, please check your result in {args.outroot} ")
 
 
@@ -764,7 +802,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--opt",
-        default="configs/object_removal.yaml",
+        default=Path(__file__).parent / "configs/object_removal.yaml",
         help="Please select your config file for inference",
     )
     # video completion
@@ -798,7 +836,7 @@ if __name__ == "__main__":
     # RAFT
     parser.add_argument(
         "--raft_model",
-        default="../LAFC/flowCheckPoint/raft-things.pth",
+        default=Path(__file__).parents[1] / "LAFC/flowCheckPoint/raft-things.pth",
         help="restore checkpoint",
     )
     parser.add_argument("--small", action="store_true", help="use small model")
@@ -812,10 +850,14 @@ if __name__ == "__main__":
     )
 
     # LAFC
-    parser.add_argument("--lafc_ckpts", type=str, default="../LAFC/checkpoint")
+    parser.add_argument(
+        "--lafc_ckpts", type=str, default=Path(__file__).parents[1] / "LAFC/checkpoint"
+    )
 
     # FGT
-    parser.add_argument("--fgt_ckpts", type=str, default="../FGT/checkpoint")
+    parser.add_argument(
+        "--fgt_ckpts", type=str, default=Path(__file__).parents[1] / "FGT/checkpoint"
+    )
 
     # extrapolation
     parser.add_argument(

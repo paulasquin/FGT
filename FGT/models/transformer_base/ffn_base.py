@@ -22,7 +22,7 @@ class FeedForward(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p),
             nn.Linear(frame_hidden * mlp_ratio, frame_hidden),
-            nn.Dropout(p)
+            nn.Dropout(p),
         )
 
     def forward(self, x, n_vecs=0, output_h=0, output_w=0):
@@ -33,7 +33,7 @@ class FeedForward(nn.Module):
 class FusionFeedForward(nn.Module):
     def __init__(self, frame_hidden, mlp_ratio, n_vecs, t2t_params, p):
         super(FusionFeedForward, self).__init__()
-        self.kernel_shape = reduce((lambda x, y: x * y), t2t_params['kernel_size'])
+        self.kernel_shape = reduce((lambda x, y: x * y), t2t_params["kernel_size"])
         self.t2t_params = t2t_params
         hidden_size = self.kernel_shape * mlp_ratio
         self.conv1 = nn.Linear(frame_hidden, hidden_size)
@@ -41,12 +41,12 @@ class FusionFeedForward(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(p),
             nn.Linear(hidden_size, frame_hidden),
-            nn.Dropout(p)
+            nn.Dropout(p),
         )
         assert t2t_params is not None and n_vecs is not None
         tp = t2t_params.copy()
         self.fold = nn.Fold(**tp)
-        del tp['output_size']
+        del tp["output_size"]
         self.unfold = nn.Unfold(**tp)
         self.n_vecs = n_vecs
 
@@ -54,25 +54,47 @@ class FusionFeedForward(nn.Module):
         x = self.conv1(x)
         b, n, c = x.size()
         if n_vecs != 0:
-            normalizer = x.new_ones(b, n, self.kernel_shape).view(-1, n_vecs, self.kernel_shape).permute(0, 2, 1)
-            x = self.unfold(F.fold(x.view(-1, n_vecs, c).permute(0, 2, 1), output_size=(output_h, output_w),
-                                   kernel_size=self.t2t_params['kernel_size'], stride=self.t2t_params['stride'],
-                                   padding=self.t2t_params['padding']) / F.fold(normalizer,
-                                                                                output_size=(output_h, output_w),
-                                                                                kernel_size=self.t2t_params[
-                                                                                    'kernel_size'],
-                                                                                stride=self.t2t_params['stride'],
-                                                                                padding=self.t2t_params[
-                                                                                    'padding'])).permute(0,
-                                                                                                         2,
-                                                                                                         1).contiguous().view(
-                b, n, c)
+            normalizer = (
+                x.new_ones(b, n, self.kernel_shape)
+                .view(-1, n_vecs, self.kernel_shape)
+                .permute(0, 2, 1)
+            )
+            x = (
+                self.unfold(
+                    F.fold(
+                        x.view(-1, n_vecs, c).permute(0, 2, 1),
+                        output_size=(output_h, output_w),
+                        kernel_size=self.t2t_params["kernel_size"],
+                        stride=self.t2t_params["stride"],
+                        padding=self.t2t_params["padding"],
+                    )
+                    / F.fold(
+                        normalizer,
+                        output_size=(output_h, output_w),
+                        kernel_size=self.t2t_params["kernel_size"],
+                        stride=self.t2t_params["stride"],
+                        padding=self.t2t_params["padding"],
+                    )
+                )
+                .permute(0, 2, 1)
+                .contiguous()
+                .view(b, n, c)
+            )
         else:
-            normalizer = x.new_ones(b, n, self.kernel_shape).view(-1, self.n_vecs, self.kernel_shape).permute(0, 2, 1)
-            x = self.unfold(self.fold(x.view(-1, self.n_vecs, c).permute(0, 2, 1)) / self.fold(normalizer)).permute(0,
-                                                                                                                    2,
-                                                                                                                    1).contiguous().view(
-                b, n, c)
+            normalizer = (
+                x.new_ones(b, n, self.kernel_shape)
+                .view(-1, self.n_vecs, self.kernel_shape)
+                .permute(0, 2, 1)
+            )
+            x = (
+                self.unfold(
+                    self.fold(x.view(-1, self.n_vecs, c).permute(0, 2, 1))
+                    / self.fold(normalizer)
+                )
+                .permute(0, 2, 1)
+                .contiguous()
+                .view(b, n, c)
+            )
         x = self.conv2(x)
         return x
 

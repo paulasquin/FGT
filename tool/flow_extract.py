@@ -22,6 +22,8 @@ import utils.region_fill as rf
 from torchvision.transforms import ToTensor
 import time
 
+from utils.base import tqdm
+
 
 def to_tensor(img):
     img = Image.fromarray(img)
@@ -30,7 +32,6 @@ def to_tensor(img):
 
 
 def gradient_mask(mask):  # 产生梯度的mask
-
     gradient_mask = np.logical_or.reduce(
         (
             mask,
@@ -76,11 +77,9 @@ def calculate_flow(args, model, vid, video, mode):
     # create_dir(os.path.join(args.outroot, vid, 'flow', mode + '_png'))
 
     with torch.no_grad():
-        for i in range(video.shape[0] - 1):
-            print(
+        for i in (bar := tqdm(range(video.shape[0] - 1))):
+            bar.set_description(
                 "Calculating {0} flow {1:2d} <---> {2:2d}".format(mode, i, i + 1),
-                "\r",
-                end="",
             )
             if mode == "forward":
                 # Flow i -> i + 1
